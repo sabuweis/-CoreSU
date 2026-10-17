@@ -25,12 +25,21 @@ jobs:
       with:
         fetch-depth: 0
 
+    - name: Extract Source (LKM)
+      run: |
+        if ! command -v unzip >/dev/null 2>&1; then
+          (apt-get update -qq && apt-get install -y -qq unzip) || (apk add --no-cache unzip) || true
+        fi
+        # 智能查找并解压 zip
+        ZIP_FILE=$(ls *.zip | head -n 1)
+        unzip -q "$ZIP_FILE"
+
     - name: Build kernelsu.ko
       run: |
-        cd kernel
+        # 智能进入解压后的目录
+        cd $(find . -maxdepth 1 -type d -name "CoreSU*" | head -n 1)/kernel
         CONFIG_KSU=m CC=clang make
         cp kernelsu.ko /tmp/${{ matrix.kmi }}_kernelsu.ko
-        ls -la /tmp/${{ matrix.kmi }}_kernelsu.ko
 
     - name: Upload LKM
       uses: actions/upload-artifact@v4
@@ -49,6 +58,13 @@ jobs:
       with:
         fetch-depth: 0
 
+    - name: Extract Source (APK)
+      run: |
+        ZIP_FILE=$(ls *.zip | head -n 1)
+        unzip -q "$ZIP_FILE"
+        DIR_NAME=$(find . -maxdepth 1 -type d -name "CoreSU*" | head -n 1)
+        echo "DIR_NAME=$DIR_NAME" >> $GITHUB_ENV
+
     - name: Download all LKMs
       uses: actions/download-artifact@v4
       with:
@@ -58,15 +74,13 @@ jobs:
 
     - name: Place all LKMs into ksud bin dir
       run: |
-        ls -la all-lkm/
-        mkdir -p userspace/ksud/bin/aarch64
-        cp all-lkm/*.ko userspace/ksud/bin/aarch64/
-        ls -la userspace/ksud/bin/aarch64/
+        mkdir -p ${{ env.DIR_NAME }}/userspace/ksud/bin/aarch64
+        cp all-lkm/*.ko ${{ env.DIR_NAME }}/userspace/ksud/bin/aarch64/
 
     - name: Sync uapi headers
       run: |
-        rm -rf manager/app/src/main/cpp/uapi
-        cp -r uapi manager/app/src/main/cpp/uapi
+        rm -rf ${{ env.DIR_NAME }}/manager/app/src/main/cpp/uapi
+        cp -r ${{ env.DIR_NAME }}/uapi ${{ env.DIR_NAME }}/manager/app/src/main/cpp/uapi
 
     - name: Setup Java JDK 21
       uses: actions/setup-java@v4
@@ -88,10 +102,10 @@ jobs:
     - name: Build ksuinit
       env:
         ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+      working-directory: ${{ env.DIR_NAME }}
       run: |
         source .github/scripts/setup-rust-build.sh aarch64-linux-android 26
         BUILTINS="$($CLANG_PATH --print-resource-dir)/lib/linux/libclang_rt.builtins-aarch64-android.a"
-        test -f "$BUILTINS"
         export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wno-unused-command-line-argument -C link-arg=$BUILTINS"
         cargo build --package ksuinit --target=aarch64-linux-android --release
         cp target/aarch64-linux-android/release/ksuinit userspace/ksud/bin/aarch64/
@@ -99,14 +113,15 @@ jobs:
     - name: Build ksud
       env:
         ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+      working-directory: ${{ env.DIR_NAME }}
       run: |
         source .github/scripts/setup-rust-build.sh aarch64-linux-android 26
         cargo build --target aarch64-linux-android --release --manifest-path ./userspace/ksud/Cargo.toml
 
     - name: Place ksud into APK
+      working-directory: ${{ env.DIR_NAME }}
       run: |
         KSUD=target/aarch64-linux-android/release/ksud
-        test -f "$KSUD"
         mkdir -p manager/app/src/main/jniLibs/arm64-v8a
         cp "$KSUD" manager/app/src/main/jniLibs/arm64-v8a/libksud.so
 
@@ -124,7 +139,7 @@ jobs:
         KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-      working-directory: ./manager
+      working-directory: ${{ env.DIR_NAME }}/manager
       run: |
         chmod +x gradlew
         ./gradlew :app:assembleRelease \
@@ -140,5 +155,5 @@ jobs:
       if: always()
       with:
         name: CoreSU-Manager-APK
-        path: manager/app/build/outputs/apk/release/*.apk
+        path: ${{ env.DIR_NAME }}/manager/app/build/outputs/apk/release/*.apk
         if-no-files-found: warn
